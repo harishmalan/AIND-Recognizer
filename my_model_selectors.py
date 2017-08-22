@@ -84,7 +84,10 @@ class SelectorBIC(ModelSelector):
 
                 model = self.base_model(n_component)
                 logL = model.score(self.X, self.lengths)
-                p = n_component * (n_component-1) + 2 * n_component * model.n_features
+                #Correction Mode, Reference ftp://metron.sta.uniroma1.it/RePEc/articoli/2002-LX-3_4-11.pdf 
+                # p =n^2 + 2 *n *f -1
+                p = n_component ** 2 + 2 * n_component * model.n_features -1
+                #p = n_component * (n_component-1) + 2 * n_component * model.n_features 
                 logN = math.log(n_component)
                 bic_score = -2 * logL + p * logN
                 hmm_bic.append(bic_score)
@@ -93,10 +96,8 @@ class SelectorBIC(ModelSelector):
         states = n_components[np.argmin(hmm_bic)] if hmm_bic else self.n_constant
         return self.base_model(states)
 
-
 class SelectorDIC(ModelSelector):
     ''' select best model based on Discriminative Information Criterion
-
     Biem, Alain. "A model selection criterion for classification: Application to hmm topology optimization."
     Document Analysis and Recognition, 2003. Proceedings. Seventh International Conference on. IEEE, 2003.
     http://citeseerx.ist.psu.edu/viewdoc/download?doi=10.1.1.58.6208&rep=rep1&type=pdf
@@ -105,48 +106,84 @@ class SelectorDIC(ModelSelector):
 
     def select(self):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
-        dic_scores = []
-        try:
-            n_components = range(self.min_n_components, self.max_n_components + 1)
-            log_p_list = []
-            for n_component in n_components:
-                model = self.base_model(n_component)
-                log_p_list.append(model.score(self.X, self.lengths))
-            sum_log_p = sum(log_p_list)
-            m = len(n_components)
-            for log_p in log_p_list:
-                avg_of_anti_p = - (sum_log_p - log_p) / (m - 1)
-                dic_score = log_p + avg_of_anti_p
-                dic_scores.append(dic_score)
-        except Exception as e:
-            pass
 
-        states = n_components[np.argmax(dic_scores)] if dic_scores else self.n_constant
-        return self.base_model(states)
+        max_dic_score = None
+        max_model = None
+        # Selects rest of the words (different than this word)
+        rest_words = list(self.words)
+        rest_words.remove(self.this_word)
+        for n in range(self.min_n_components, self.max_n_components+1):
+            try:
+                # Fits model for this word
+                model = self.base_model(n)
+                # Gets score
+                score = model.score(self.X, self.lengths)
+                all_score = 0.0
+                # For each word (not this word), fits a model and get score
+                for w in rest_words:
+                    # X, lengths corresponding to that word
+                    X, lengths = self.hwords[w]
+                    # Accumulates score
+                    all_score = all_score+model.score(X, lengths)
+                # Calculate DIC Score
+                dic_score =  score - (all_score / (len(self.words) - 1))
+                # Keep model with higher DIC score
+                if max_dic_score is None or max_dic_score < dic_score:
+                    max_dic_score = dic_score
+                    max_model = model
+            except:
+                    pass
 
+        return max_model
 
 
 class SelectorCV(ModelSelector):
     ''' select best model based on average log Likelihood of cross-validation folds
-
     '''
 
     def select(self):
         warnings.filterwarnings("ignore", category=DeprecationWarning)
-        mean_scores = []
-        split_method = KFold()
-        try:
-            n_components = range(self.min_n_components, self.max_n_components + 1)
-            for n_component in n_components:
-                model = self.base_model(n_component)
-                fold_scores = []
-                for _, test_idx in split_method.split(self.sequences):
-                    test_X, test_length = combine_sequences(test_idx, self.sequences)
-                    fold_scores.append(model.score(test_X, test_length))
-                mean_scores.append(np.mean(fold_scores))
-        except Exception as e:
-            pass
 
-        states = n_components[np.argmax(mean_scores)] if mean_scores else self.n_constant
+        max_score = None
+        max_model = None
 
-        return self.base_model(states)
+        for n in range(self.min_n_components, self.max_n_components + 1):
+            try:
+                all_score = 0.0
+                qty = 0
+                final_model = None
+                if (len(self.sequences) >= 2):
+                    # Generate K folds
+                    folds = min(len(self.sequences),3)
+                    split_method = KFold(shuffle=True, n_splits=folds)
+                    parts = split_method.split(self.sequences)
+                    for cv_train_idx, cv_test_idx in parts:
+                        # Kfold information for train
+                        X_train, lengths_train = np.asarray(combine_sequences(cv_train_idx, self.sequences))
+                        # Kfold information for test
+                        X_test, lengths_test = np.asarray(combine_sequences(cv_test_idx, self.sequences))
+                        # Fit model with train data
+                        model = GaussianHMM(n_components=n, covariance_type="diag", n_iter=1000,
+                                        random_state=self.random_state, verbose=False).fit(X_train, lengths_train)
+                        # Get score using test data
+                        all_score = all_score+model.score(X_test,lengths_test)
+                        qty = qty+1
+                    # Calculate score
+                    score = all_score / qty
+                else:
+                    # cant be fold
+                    final_model = GaussianHMM(n_components=n, covariance_type="diag", n_iter=1000,
+                                        random_state=self.random_state, verbose=False).fit(self.X, self.lengths)
+                    score = model.score(self.X, self.lengths)
+                # Keep model with best score
+                if max_score is None or max_score < score:
+                    max_score = score
+                    if final_model is None:
+                        final_model = GaussianHMM(n_components=n, covariance_type="diag", n_iter=1000,
+                                                  random_state=self.random_state, verbose=False).fit(self.X, self.lengths)
+                    max_model = final_model
+
+            except:
+                pass
+
+        return max_model
